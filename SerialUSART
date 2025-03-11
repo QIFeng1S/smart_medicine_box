@@ -1,0 +1,147 @@
+#include "stm32f10x.h"                  // Device header
+#include "Delay.h"
+#include "OLED.h"
+#include "AD.h"
+#include "servo.h"
+#include "dht11_multi.h"
+#include "Key.h"
+#include "USART.h"                     // 添加USART头文件
+
+//USART初始化
+void USART_Init(void)
+{
+    USART_InitTypeDef USART_InitStructure;
+    GPIO_InitTypeDef GPIO_InitStructure;
+    NVIC_InitTypeDef NVIC_InitStructure;
+
+    // 使能USART1和GPIOA时钟
+    RCC_APB2PeriphClockCmd(RCC_APB2Periph_USART1 | RCC_APB2Periph_GPIOA, ENABLE);
+
+    // 配置USART1 Tx (PA9)和Rx (PA10)的GPIO引脚
+    GPIO_InitStructure.GPIO_Pin = GPIO_Pin_9;
+    GPIO_InitStructure.GPIO_Mode = GPIO_Mode_AF_PP;
+    GPIO_InitStructure.GPIO_Speed = GPIO_Speed_50MHz;
+    GPIO_Init(GPIOA, &GPIO_InitStructure);
+    
+    GPIO_InitStructure.GPIO_Pin = GPIO_Pin_10;
+    GPIO_InitStructure.GPIO_Mode = GPIO_Mode_IN_FLOATING;
+    GPIO_Init(GPIOA, &GPIO_InitStructure);
+
+    // 配置USART1参数
+    USART_InitStructure.USART_BaudRate = 9600;
+    USART_InitStructure.USART_WordLength = USART_WordLength_8b;
+    USART_InitStructure.USART_StopBits = USART_StopBits_1;
+    USART_InitStructure.USART_Parity = USART_Parity_No;
+    USART_InitStructure.USART_HardwareFlowControl = USART_HardwareFlowControl_None;
+    USART_InitStructure.USART_Mode = USART_Mode_Rx | USART_Mode_Tx;
+
+    USART_Init(USART1, &USART_InitStructure);
+
+    // 使能USART1
+    USART_Cmd(USART1, ENABLE);
+
+    // 配置USART1接收中断
+    USART_ITConfig(USART1, USART_IT_RXNE, ENABLE);
+    NVIC_InitStructure.NVIC_IRQChannel = USART1_IRQn;
+    NVIC_InitStructure.NVIC_IRQChannelPreemptionPriority = 0;
+    NVIC_InitStructure.NVIC_IRQChannelSubPriority = 0;
+    NVIC_InitStructure.NVIC_IRQChannelCmd = ENABLE;
+    NVIC_Init(&NVIC_InitStructure);
+}
+
+//串口接收
+char USART_ReceiveChar(void)
+{
+    while (USART_GetFlagStatus(USART1, USART_FLAG_RXNE) == RESET);
+    return USART_ReceiveData(USART1);
+}
+
+int main(void)
+{
+	uint8_t temp1, temp2, temp3;    // 三个盒子的温度
+	uint8_t humi1, humi2, humi3;    // 三个盒子的湿度
+	uint8_t currentBox = 1;         // 当前选中的盒子编号
+	uint8_t boxStatus[3] = {0, 0, 0};  // 三个盒子的状态，0表示关闭，1表示打开
+	char receivedData;              // 接收到的串口数据
+	
+	OLED_Init();
+	OLED_ShowString(1, 1, "medicine_box");
+	OLED_ShowString(2, 1, "Box:");
+	OLED_ShowString(3, 1, "T:");
+	OLED_ShowString(4, 1, "H:");
+	
+	Servo_Init();
+	DHT11_Multi_Init();  // 初始化三个DHT11
+	USART_Init();        // 初始化串口
+	Key_Init();          // 初始化按键（可以保留用于调试）
+	
+	// 初始化舵机位置（关闭状态）
+	ServoA_SetAngle(0);
+	ServoB_SetAngle(0);
+	ServoC_SetAngle(0);
+	
+	while (1)	
+	{
+		// 读取所有DHT11数据
+		DHT11_1_Read_Data(&temp1, &humi1);
+		DHT11_2_Read_Data(&temp2, &humi2);
+		DHT11_3_Read_Data(&temp3, &humi3);
+		
+		// 检测串口数据
+		if (USART_GetFlagStatus(USART1, USART_FLAG_RXNE) != RESET)
+		{
+			receivedData = USART_ReceiveData(USART1);
+			if (receivedData == 'a')  // 发送'a'切换选中的盒子
+			{
+				currentBox = (currentBox % 3) + 1;  // 循环切换1-3
+			}
+			else if (receivedData == 'b')  // 发送'b'开关当前选中的盒子
+			{
+				boxStatus[currentBox - 1] = !boxStatus[currentBox - 1];  // 切换状态
+				
+				// 根据当前选中的盒子控制对应的舵机
+				switch(currentBox)
+				{
+					case 1:
+						ServoA_SetAngle(boxStatus[0] ? 90 : 0);  // 打开为90度，关闭为0度
+						break;
+					case 2:
+						ServoB_SetAngle(boxStatus[1] ? 90 : 0);
+						break;
+					case 3:
+						ServoC_SetAngle(boxStatus[2] ? 90 : 0);
+						break;
+				}
+			}
+		}
+		
+		// 显示当前选中的盒子编号和状态
+		OLED_ShowNum(2, 5, currentBox, 1);
+		OLED_ShowString(2, 7, boxStatus[currentBox - 1] ? "Open " : "Close");
+		
+		// 显示温湿度
+		switch(currentBox)
+		{
+			case 1:
+				OLED_ShowNum(3, 3, temp1, 2);
+				OLED_ShowChar(3, 5, 'C');
+				OLED_ShowNum(4, 3, humi1, 2);
+				OLED_ShowChar(4, 5, '%');
+				break;
+			case 2:
+				OLED_ShowNum(3, 3, temp2, 2);
+				OLED_ShowChar(3, 5, 'C');
+				OLED_ShowNum(4, 3, humi2, 2);
+				OLED_ShowChar(4, 5, '%');
+				break;
+			case 3:
+				OLED_ShowNum(3, 3, temp3, 2);
+				OLED_ShowChar(3, 5, 'C');
+				OLED_ShowNum(4, 3, humi3, 2);
+				OLED_ShowChar(4, 5, '%');
+				break;
+		}
+		
+		Delay_ms(1000);  // 每秒更新一次数据
+	}
+}
