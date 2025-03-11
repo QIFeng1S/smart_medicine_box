@@ -1,0 +1,280 @@
+Option Explicit
+
+' 声明串口通信所需API
+Declare PtrSafe Function CreateFile Lib "kernel32" Alias "CreateFileA" (ByVal lpFileName As String, ByVal dwDesiredAccess As Long, ByVal dwShareMode As Long, ByVal lpSecurityAttributes As Long, ByVal dwCreationDisposition As Long, ByVal dwFlagsAndAttributes As Long, ByVal hTemplateFile As Long) As Long
+Declare PtrSafe Function ReadFile Lib "kernel32" (ByVal hFile As Long, ByVal lpBuffer As String, ByVal nNumberOfBytesToRead As Long, ByRef lpNumberOfBytesRead As Long, ByVal lpOverlapped As Long) As Long
+Declare PtrSafe Function WriteFile Lib "kernel32" (ByVal hFile As Long, ByVal lpBuffer As String, ByVal nNumberOfBytesToWrite As Long, ByRef lpNumberOfBytesWritten As Long, ByVal lpOverlapped As Long) As Long
+Declare PtrSafe Function CloseHandle Lib "kernel32" (ByVal hObject As Long) As Long
+Declare PtrSafe Function SetCommState Lib "kernel32" (ByVal hCommDev As Long, lpDCB As DCB) As Long
+Declare PtrSafe Function GetCommState Lib "kernel32" (ByVal hCommDev As Long, lpDCB As DCB) As Long
+Declare PtrSafe Function SetCommTimeouts Lib "kernel32" (ByVal hFile As Long, lpCommTimeouts As COMMTIMEOUTS) As Long
+
+' 串口配置结构体
+Type DCB
+    DCBlength As Long
+    BaudRate As Long
+    fBinary As Long
+    fParity As Long
+    fOutxCtsFlow As Long
+    fOutxDsrFlow As Long
+    fDtrControl As Long
+    fDsrSensitivity As Long
+    fTXContinueOnXoff As Long
+    fOutX As Long
+    fInX As Long
+    fErrorChar As Long
+    fNull As Long
+    fRtsControl As Long
+    fAbortOnError As Long
+    fDummy2 As Long
+    wReserved As Integer
+    XonLim As Integer
+    XoffLim As Integer
+    ByteSize As Byte
+    Parity As Byte
+    StopBits As Byte
+    XonChar As Byte
+    XoffChar As Byte
+    ErrorChar As Byte
+    EofChar As Byte
+    EvtChar As Byte
+    wReserved1 As Integer
+End Type
+
+' 串口超时结构体
+Type COMMTIMEOUTS
+    ReadIntervalTimeout As Long
+    ReadTotalTimeoutMultiplier As Long
+    ReadTotalTimeoutConstant As Long
+    WriteTotalTimeoutMultiplier As Long
+    WriteTotalTimeoutConstant As Long
+End Type
+
+' 常量定义
+Const GENERIC_READ = &H80000000
+Const GENERIC_WRITE = &H40000000
+Const OPEN_EXISTING = 3
+Const FILE_ATTRIBUTE_NORMAL = &H80
+Const INVALID_HANDLE_VALUE = -1
+
+' 全局变量
+Dim SerialHandle As Long
+Dim TimerEnabled As Boolean
+Dim FeiShuUpdateEnabled As Boolean
+Dim LastRow As Long
+Dim DataBuffer As String
+
+Sub SetupSerial()
+    ' 配置表格
+    If Worksheets.Count < 1 Then
+        Worksheets.Add
+    End If
+    
+    With Worksheets(1)
+        .Cells(1, 1).Value = "格子ID"
+        .Cells(1, 2).Value = "温度(°C)"
+        .Cells(1, 3).Value = "湿度(%)"
+        .Cells(1, 4).Value = "重量(g)"
+        .Cells(1, 5).Value = "门状态"
+        .Cells(1, 6).Value = "更新时间"
+        
+        ' 添加控制区域
+        .Cells(3, 7).Value = "控制区域："
+        .Cells(4, 7).Value = "COM端口:"
+        .Cells(4, 8).Value = "COM3"  ' 默认COM端口，可修改
+        
+        ' 添加历史数据保存开关
+        .Cells(6, 7).Value = "保存历史数据:"
+        .Cells(6, 8).Value = False
+        
+        ' 添加飞书同步设置
+        .Cells(8, 7).Value = "飞书同步:"
+        .Cells(8, 8).Value = False
+    End With
+    
+    ' 获取COM端口设置
+    Dim comPort As String
+    comPort = "\\.\COM" & Trim(Worksheets(1).Cells(4, 8).Value)
+    
+    ' 打开串口
+    SerialHandle = CreateFile(comPort, GENERIC_READ Or GENERIC_WRITE, 0, 0, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, 0)
+    
+    If SerialHandle <> INVALID_HANDLE_VALUE Then
+        ' 配置串口参数
+        Dim dcb As DCB
+        Dim commTimeouts As COMMTIMEOUTS
+        
+        ' 获取当前配置
+        GetCommState SerialHandle, dcb
+        
+        ' 修改配置
+        dcb.BaudRate = 9600    ' STM32设置的波特率
+        dcb.ByteSize = 8       ' 数据位
+        dcb.Parity = 0         ' 无校验
+        dcb.StopBits = 0       ' 1个停止位
+        
+        ' 应用配置
+        SetCommState SerialHandle, dcb
+        
+        ' 设置超时
+        commTimeouts.ReadIntervalTimeout = 1
+        commTimeouts.ReadTotalTimeoutMultiplier = 1
+        commTimeouts.ReadTotalTimeoutConstant = 1000
+        commTimeouts.WriteTotalTimeoutMultiplier = 1
+        commTimeouts.WriteTotalTimeoutConstant = 1000
+        SetCommTimeouts SerialHandle, commTimeouts
+        
+        MsgBox "串口" & Trim(Worksheets(1).Cells(4, 8).Value) & "已连接成功！"
+        
+        ' 设置初始行
+        LastRow = 2
+        
+        ' 启动定时器
+        TimerEnabled = True
+        Application.OnTime Now + TimeValue("00:00:01"), "ReadSerialData"
+        
+        ' 设置飞书同步状态
+        FeiShuUpdateEnabled = Worksheets(1).Cells(8, 8).Value
+    Else
+        MsgBox "无法连接串口，请检查连接或端口号！"
+    End If
+End Sub
+
+Sub ReadSerialData()
+    If SerialHandle <> INVALID_HANDLE_VALUE Then
+        Dim Buffer As String * 255
+        Dim BytesRead As Long
+        Dim LineData As String
+        Dim Lines() As String
+        Dim i As Integer
+        
+        ' 读取串口数据
+        ReadFile SerialHandle, Buffer, 255, BytesRead, 0
+        
+        If BytesRead > 0 Then
+            ' 添加到缓冲区
+            DataBuffer = DataBuffer & Left(Buffer, BytesRead)
+            
+            ' 检查是否有完整行
+            If InStr(DataBuffer, vbCrLf) > 0 Then
+                Lines = Split(DataBuffer, vbCrLf)
+                
+                ' 处理完整行
+                For i = 0 To UBound(Lines) - 1
+                    If Len(Lines(i)) > 0 Then
+                        ParseData Lines(i)
+                    End If
+                Next
+                
+                ' 保留最后一个不完整行
+                DataBuffer = Lines(UBound(Lines))
+            End If
+        End If
+        
+        ' 继续定时读取
+        If TimerEnabled Then
+            Application.OnTime Now + TimeValue("00:00:01"), "ReadSerialData"
+        End If
+    End If
+End Sub
+
+Sub ParseData(ByVal data As String)
+    Dim values() As String
+    Dim ws As Worksheet
+    Dim saveHistory As Boolean
+    
+    ' 确保数据包含逗号分隔的值
+    If InStr(data, ",") > 0 Then
+        values = Split(data, ",")
+        
+        ' 确保有足够的数据
+        If UBound(values) >= 4 Then
+            Set ws = Worksheets(1)
+            saveHistory = ws.Cells(6, 8).Value
+            
+            ' 更新表格数据
+            ws.Cells(2, 1).Value = Trim(values(0)) ' ID
+            ws.Cells(2, 2).Value = Trim(values(1)) ' 温度
+            ws.Cells(2, 3).Value = Trim(values(2)) ' 湿度
+            ws.Cells(2, 4).Value = Trim(values(3)) ' 重量
+            ws.Cells(2, 5).Value = Trim(values(4)) ' 门状态
+            ws.Cells(2, 6).Value = Now() ' 更新时间
+            
+            ' 保存历史数据
+            If saveHistory Then
+                ws.Cells(LastRow, 1).Value = Trim(values(0))
+                ws.Cells(LastRow, 2).Value = Trim(values(1))
+                ws.Cells(LastRow, 3).Value = Trim(values(2))
+                ws.Cells(LastRow, 4).Value = Trim(values(3))
+                ws.Cells(LastRow, 5).Value = Trim(values(4))
+                ws.Cells(LastRow, 6).Value = Now()
+                
+                LastRow = LastRow + 1
+            End If
+            
+            ' 如果启用了飞书同步，则更新飞书数据
+            If FeiShuUpdateEnabled Then
+                Application.OnTime Now + TimeValue("00:00:01"), "UpdateFeiShu"
+            End If
+        End If
+    End If
+End Sub
+
+Sub SendOpenDoorCommand()
+    Dim BytesWritten As Long
+    
+    If SerialHandle <> INVALID_HANDLE_VALUE Then
+        WriteFile SerialHandle, "O", 1, BytesWritten, 0
+    End If
+End Sub
+
+Sub SendCloseDoorCommand()
+    Dim BytesWritten As Long
+    
+    If SerialHandle <> INVALID_HANDLE_VALUE Then
+        WriteFile SerialHandle, "C", 1, BytesWritten, 0
+    End If
+End Sub
+
+Sub CloseSerial()
+    ' 停止定时器
+    TimerEnabled = False
+    
+    ' 关闭串口
+    If SerialHandle <> INVALID_HANDLE_VALUE Then
+        CloseHandle SerialHandle
+        SerialHandle = INVALID_HANDLE_VALUE
+        MsgBox "串口已断开连接"
+    End If
+End Sub
+
+Sub ToggleFeiShuUpdate()
+    FeiShuUpdateEnabled = Not FeiShuUpdateEnabled
+    Worksheets(1).Cells(8, 8).Value = FeiShuUpdateEnabled
+End Sub
+
+Sub UpdateFeiShu()
+    ' 这个函数用于将数据更新到飞书
+    
+    Dim ws As Worksheet
+    Set ws = Worksheets(1)
+    
+    ' 准备要发送的数据
+    Dim id As String, temp As String, humid As String, weight As String, doorStatus As String, updateTime As String
+    
+    id = ws.Cells(2, 1).Value
+    temp = ws.Cells(2, 2).Value
+    humid = ws.Cells(2, 3).Value
+    weight = ws.Cells(2, 4).Value
+    doorStatus = ws.Cells(2, 5).Value
+    updateTime = ws.Cells(2, 6).Value
+    
+    ' 调用飞书API更新数据
+    UpdateFeiShuData id, temp, humid, weight, doorStatus, updateTime
+End Sub
+
+Sub UpdateFeiShuData(id As String, temp As String, humid As String, weight As String, doorStatus As String, updateTime As String)
+    ' 这个函数会在飞书API部分详细实现
+    ' 简单记录日志，表示已尝试更新
+    Debug.Print "尝试更新飞书数据: " & Now() & " - ID:" & id & " 温度:" & temp & " 湿度:" & humid & " 重量:" & weight
+End Sub
