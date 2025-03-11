@@ -1,0 +1,132 @@
+' 引入必要的引用：工具 > 引用 > Microsoft WinHTTP Services
+' 并导入JsonConverter.bas，并引用Microsoft Scripting Runtime
+'	1.	下载 JsonConverter.bas 文件
+'	2.	在VBA编辑器中：
+'	•	点击 工具 > 引用 确保已经添加 Microsoft Scripting Runtime
+'	•	右键你的工程，选择 导入文件，导入 JsonConverter.bas
+
+' 飞书API相关常量
+Const FEISHU_APP_ID = "your_app_id"
+Const FEISHU_APP_SECRET = "your_app_secret"
+Const FEISHU_BASE_URL = "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal"
+Const FEISHU_BITABLE_URL = "https://open.feishu.cn/open-apis/bitable/v1/apps/YOUR_BITABLE_APP_TOKEN/tables/YOUR_TABLE_ID/records"
+
+' 获取飞书访问令牌
+Function GetFeiShuToken() As String
+    Dim http As Object
+    Dim jsonText As String
+    Dim response As String
+    Dim json As Object
+    
+    Set http = CreateObject("WinHttp.WinHttpRequest.5.1")
+    
+    ' 发送请求获取token
+    jsonText = "{""app_id"":""" & FEISHU_APP_ID & """,""app_secret"":""" & FEISHU_APP_SECRET & """}"
+    
+    With http
+        .Open "POST", FEISHU_BASE_URL, False
+        .SetRequestHeader "Content-Type", "application/json; charset=utf-8"
+        .Send jsonText
+        response = .ResponseText
+    End With
+    
+    ' 解析JSON响应
+    Set json = JsonConverter.ParseJson(response)
+    
+    ' 提取token
+    If Not json Is Nothing Then
+        GetFeiShuToken = json("tenant_access_token")
+    Else
+        GetFeiShuToken = ""
+    End If
+End Function
+
+' 更新飞书多维表格数据
+Sub UpdateFeiShuData(id As String, temp As String, humid As String, weight As String, doorStatus As String, updateTime As String)
+    Dim http As Object
+    Dim token As String
+    Dim jsonData As String
+    Dim response As String
+    Dim jsonResponse As Object
+    
+    ' 获取访问令牌
+    token = GetFeiShuToken()
+    
+    ' 准备要发送的数据
+    jsonData = "{""fields"":{" & _
+               """ID"":""" & id & """," & _
+               """温度"":""" & temp & """," & _
+               """湿度"":""" & humid & """," & _
+               """重量"":""" & weight & """," & _
+               """门状态"":""" & doorStatus & """," & _
+               """更新时间"":"" & updateTime & """" & _
+               "}}"
+    
+    ' 创建HTTP请求
+    Set http = CreateObject("WinHttp.WinHttpRequest.5.1")
+    
+    With http
+        .Open "POST", FEISHU_BITABLE_URL, False
+        .SetRequestHeader "Content-Type", "application/json; charset=utf-8"
+        .SetRequestHeader "Authorization", "Bearer " & token
+        .Send jsonData
+        response = .ResponseText
+    End With
+    
+    ' 解析响应
+    Set jsonResponse = JsonConverter.ParseJson(response)
+    
+    If Not jsonResponse Is Nothing Then
+        Debug.Print "飞书API响应状态码: " & jsonResponse("code")
+        Debug.Print "飞书API响应信息: " & jsonResponse("msg")
+    Else
+        Debug.Print "解析响应失败"
+    End If
+End Sub
+
+' 更新现有记录
+Sub UpdateFeiShuExistingRecord(recordId As String, id As String, temp As String, humid As String, weight As String, doorStatus As String, updateTime As String)
+    Dim http As Object
+    Dim token As String
+    Dim jsonData As String
+    Dim response As String
+    Dim updateUrl As String
+    Dim jsonResponse As Object
+    
+    ' 获取访问令牌
+    token = GetFeiShuToken()
+    
+    ' 更新记录的URL
+    updateUrl = FEISHU_BITABLE_URL & "/" & recordId
+    
+    ' 准备要发送的数据
+    jsonData = "{""fields"":{" & _
+               """ID"":""" & id & """," & _
+               """温度"":""" & temp & """," & _
+               """湿度"":""" & humid & """," & _
+               """重量"":""" & weight & """," & _
+               """门状态"":""" & doorStatus & """," & _
+               """更新时间"":"" & updateTime & """" & _
+               "}}"
+    
+    ' 创建HTTP请求
+    Set http = CreateObject("WinHttp.WinHttpRequest.5.1")
+    
+    With http
+        .Open "PUT", updateUrl, False
+        .SetRequestHeader "Content-Type", "application/json; charset=utf-8"
+        .SetRequestHeader "Authorization", "Bearer " & token
+        .Send jsonData
+        response = .ResponseText
+    End With
+    
+    ' 解析响应
+    Set jsonResponse = JsonConverter.ParseJson(response)
+    
+    If Not jsonResponse Is Nothing Then
+        Debug.Print "飞书API更新响应状态码: " & jsonResponse("code")
+        Debug.Print "飞书API更新响应信息: " & jsonResponse("msg")
+    Else
+        Debug.Print "解析响应失败"
+    End If
+End Sub
